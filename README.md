@@ -1,6 +1,13 @@
 # ClaudeUsage — floating usage bars for macOS
 
-A small always-on-top panel showing your Claude limits: current session (5-hour), weekly (all models), and any other limit your account reports (e.g. per-model weekly limits, extra usage). Refreshes every 60 s.
+A small always-on-top panel showing your Claude limits, one line per limit:
+
+- **Current session** — the 5-hour limit
+- **Weekly · all models**
+- **Weekly · Fable** (or other per-model weekly limits your plan has)
+- **Extra usage (credits)** — pay-as-you-go credits used this month, if enabled (hover for the dollar amounts)
+
+Refreshes every 60 s.
 
 Works on Apple Silicon and Intel Macs, macOS 12+.
 
@@ -38,9 +45,8 @@ If Claude Code is set up to use AWS Bedrock or an API key instead of a claude.ai
 - **Right-click** (or Ctrl-click) for all options:
   - **Refresh now**
   - **Show bars** — tick which limits to display
-  - **Size** — Small / Medium / Large presets (or resize from the edges for anything in between)
-  - **Compact layout** — one line per bar (hover a bar to see its reset time)
-  - **Opacity** — 100 / 85 / 70 / 50 %
+  - **Compact layout** — on by default: one line per bar (hover a bar to see its reset time). Turn off for the larger layout with reset times under each bar
+  - **Opacity** — slider, 20–100 %
   - **Show details** — percentages, reset times, "last updated" line
   - **Refresh every** — 30 s / 1 / 2 / 5 min
   - **Keep on top**, **Reset settings**, **Quit**
@@ -58,4 +64,8 @@ Needs the Xcode Command Line Tools (`xcode-select --install`).
 
 ## Notes
 
-It calls the same internal endpoint Claude Code uses for `/usage` (`api.anthropic.com/api/oauth/usage`), not a public API, so it could change. Every field with a `utilization` value becomes a bar, so new limits show up automatically. If something breaks, the error appears in the panel. Your token never leaves your Mac except to that endpoint.
+It calls the same internal endpoint Claude Code uses for `/usage` (`api.anthropic.com/api/oauth/usage`), not a public API, so it could change. Every limit the endpoint reports becomes a bar, so new limits show up automatically. If something breaks, the error appears in the panel. Your token never leaves your Mac except to that endpoint.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

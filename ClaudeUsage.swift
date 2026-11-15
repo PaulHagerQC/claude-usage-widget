@@ -15,6 +15,7 @@ struct Bucket: Identifiable {
     let label: String
     let percent: Double
     let resetsAt: Date?
+    var detail: String? = nil   // shown instead of a reset time, e.g. "$217 of $5,000 this month"
 }
 
 struct WidgetError: LocalizedError {
@@ -125,15 +126,41 @@ final class UsageStore: ObservableObject, @unchecked Sendable {
         return u
     }
 
-    // MARK: Parsing — any top-level object with a numeric "utilization" becomes a bar.
+    // MARK: Parsing
+    // 1. Any top-level object with a numeric "utilization" becomes a bar (five_hour, seven_day, …).
+    // 2. The "limits" list adds limits that only appear there — e.g. a per-model weekly limit
+    //    such as Fable ({"kind": "weekly_scoped", "scope": {"model": {"display_name": "Fable"}}}).
 
     static func parse(_ json: [String: Any]) -> [Bucket] {
         var out: [Bucket] = []
         for (k, v) in json {
             guard let d = v as? [String: Any],
                   let u = (d["utilization"] as? NSNumber)?.doubleValue else { continue }
-            out.append(Bucket(id: k, label: label(for: k), percent: u,
-                              resetsAt: parseDate(d["resets_at"] as? String)))
+            var b = Bucket(id: k, label: label(for: k), percent: u,
+                           resetsAt: parseDate(d["resets_at"] as? String))
+            if k == "extra_usage" { b.detail = creditsText(d) }
+            out.append(b)
+        }
+        for l in (json["limits"] as? [[String: Any]]) ?? [] {
+            guard let pct = (l["percent"] as? NSNumber)?.doubleValue else { continue }
+            let kind = l["kind"] as? String ?? ""
+            let scope = l["scope"] as? [String: Any]
+            let model = (scope?["model"] as? [String: Any])?["display_name"] as? String
+            let surface = (scope?["surface"] as? [String: Any])?["display_name"] as? String
+                ?? scope?["surface"] as? String
+            let id: String, name: String
+            switch kind {
+            case "session": id = "five_hour"; name = label(for: id)
+            case "weekly_all": id = "seven_day"; name = label(for: id)
+            default:
+                guard let what = model ?? surface else { continue }
+                let slug = what.lowercased().replacingOccurrences(of: " ", with: "_")
+                id = (l["group"] as? String == "weekly" ? "seven_day_" : kind + "_") + slug
+                name = (l["group"] as? String == "weekly" ? "Weekly · " : "") + what
+            }
+            if out.contains(where: { $0.id == id }) { continue }
+            out.append(Bucket(id: id, label: name, percent: pct,
+                              resetsAt: parseDate(l["resets_at"] as? String)))
         }
         return out.sorted {
             let a = order($0.id), b = order($1.id)
@@ -141,10 +168,26 @@ final class UsageStore: ObservableObject, @unchecked Sendable {
         }
     }
 
+    /// "$217 of $5,000 this month" from the extra_usage object (amounts are in cents).
+    static func creditsText(_ d: [String: Any]) -> String? {
+        guard let used = (d["used_credits"] as? NSNumber)?.doubleValue,
+              let limit = (d["monthly_limit"] as? NSNumber)?.doubleValue else { return nil }
+        let places = (d["decimal_places"] as? NSNumber)?.intValue ?? 2
+        let div = pow(10, Double(places))
+        let f = NumberFormatter()
+        f.numberStyle = .currency
+        f.currencyCode = d["currency"] as? String ?? "USD"
+        f.maximumFractionDigits = 0
+        guard let u = f.string(from: NSNumber(value: used / div)),
+              let l = f.string(from: NSNumber(value: limit / div)) else { return nil }
+        return "\(u) of \(l) this month"
+    }
+
     static func order(_ k: String) -> Int {
         switch k {
         case "five_hour": return 0
         case "seven_day": return 1
+        case "extra_usage": return 9
         default: return k.hasPrefix("seven_day_") ? 2 : 3
         }
     }
@@ -153,6 +196,7 @@ final class UsageStore: ObservableObject, @unchecked Sendable {
         switch k {
         case "five_hour": return "Current session"
         case "seven_day": return "Weekly · all models"
+        case "extra_usage": return "Extra usage (credits)"
         default: break
         }
         let pretty: (Substring) -> String = { s in
@@ -219,12 +263,11 @@ enum Pref {
 
     static func registerDefaults() {
         UserDefaults.standard.register(defaults: [
-            scale: 1.0, compact: false, showPercent: true, showResets: true,
+            scale: 1.0, compact: true, showPercent: true, showResets: true,
             showUpdated: true, opacity: 1.0, refreshSeconds: 60,
         ])
     }
 
-    static let presets: [(String, Double)] = [("Small", 0.85), ("Medium", 1.0), ("Large", 1.3)]
 }
 
 /// How the content fits the window. The window is resized freely (like any macOS window);
@@ -278,7 +321,7 @@ struct BarRow: View {
                 bar
                 if showPercent { percentText.frame(width: 34 * scale, alignment: .trailing) }
             }
-            .help(resetText(bucket.resetsAt) ?? "")
+            .help(resetText(bucket.resetsAt) ?? bucket.detail ?? "")
         } else {
             VStack(alignment: .leading, spacing: 3 * scale) {
                 HStack {
@@ -287,7 +330,7 @@ struct BarRow: View {
                     if showPercent { percentText }
                 }
                 bar
-                if showResets, let r = resetText(bucket.resetsAt) {
+                if showResets, let r = resetText(bucket.resetsAt) ?? bucket.detail {
                     Text(r).font(.system(size: 9.5 * scale)).foregroundColor(.secondary).lineLimit(1)
                 }
             }
@@ -304,7 +347,7 @@ struct UsageView: View {
     @ObservedObject var store: UsageStore
     var onNaturalHeight: (CGFloat) -> Void = { _ in }
     @AppStorage("hiddenBuckets") var hiddenRaw: String = ""
-    @AppStorage(Pref.compact) var compact: Bool = false
+    @AppStorage(Pref.compact) var compact: Bool = true
     @AppStorage(Pref.showPercent) var showPercent: Bool = true
     @AppStorage(Pref.showResets) var showResets: Bool = true
     @AppStorage(Pref.showUpdated) var showUpdated: Bool = true
@@ -441,7 +484,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     func applicationDidFinishLaunching(_ notification: Notification) {
         Pref.registerDefaults()
         installEditMenu()
-        panel = WidgetPanel(contentRect: NSRect(x: 0, y: 0, width: 250, height: 160),
+        panel = WidgetPanel(contentRect: NSRect(x: 0, y: 0, width: 270, height: 90),
                             styleMask: [.titled, .resizable, .fullSizeContentView, .nonactivatingPanel],
                             backing: .buffered, defer: false)
         panel.titleVisibility = .hidden
@@ -473,7 +516,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
         if !panel.setFrameUsingName("ClaudeUsageWidget"), let screen = NSScreen.main {
             let v = screen.visibleFrame
-            panel.setFrame(NSRect(x: v.maxX - 270, y: v.maxY - 180, width: 250, height: 160), display: false)
+            let w = Layout.baseWidth(compact: compact)
+            panel.setFrame(NSRect(x: v.maxX - w - 20, y: v.maxY - 110, width: w, height: 90), display: false)
         }
         panel.setFrameAutosaveName("ClaudeUsageWidget")
         panel.orderFrontRegardless()
@@ -530,17 +574,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
 
         // Appearance
-        let pct = Int((defaults.double(forKey: Pref.scale) * 100).rounded())
-        let isPreset = Pref.presets.contains { Int(($0.1 * 100).rounded()) == pct }
-        submenu(menu, isPreset ? "Size" : "Size (custom)",
-                Pref.presets.map { ($0.0, Int(($0.1 * 100).rounded())) },
-                selected: pct, action: #selector(setSizePreset(_:)))
         let layout = add(menu, "Compact layout", #selector(togglePref(_:)))
         layout.representedObject = Pref.compact
         layout.state = compact ? .on : .off
-        let op = Int((defaults.double(forKey: Pref.opacity) * 100).rounded())
-        submenu(menu, "Opacity", [("100%", 100), ("85%", 85), ("70%", 70), ("50%", 50)],
-                selected: op, action: #selector(setOpacity(_:)))
+        menu.addItem(opacitySliderItem())
         menu.addItem(.separator())
 
         // What to show
@@ -614,29 +651,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         panel.level = keepOnTop ? .floating : .normal
     }
 
-    func applyPreset(_ k: Double) {
+    /// Resize to the standard width for the layout at text size k (height fits the content).
+    func fitDefaultSize(_ k: Double) {
         defaults.set(k, forKey: Pref.scale)
         let k = CGFloat(k)
         setSize(NSSize(width: (Layout.baseWidth(compact: compact) * k).rounded(),
                        height: (natural * k).rounded()))
     }
 
-    @objc func setSizePreset(_ sender: NSMenuItem) {
-        guard let v = sender.representedObject as? Int else { return }
-        applyPreset(Double(v) / 100)
-    }
-
     @objc func togglePref(_ sender: NSMenuItem) {
         guard let key = sender.representedObject as? String else { return }
         defaults.set(!defaults.bool(forKey: key), forKey: key)
         // Switching layout changes the natural width; resize to match at the current text size.
-        if key == Pref.compact { applyPreset(defaults.double(forKey: Pref.scale)) }
+        if key == Pref.compact { fitDefaultSize(defaults.double(forKey: Pref.scale)) }
     }
 
-    @objc func setOpacity(_ sender: NSMenuItem) {
-        guard let v = sender.representedObject as? Int else { return }
-        defaults.set(Double(v) / 100, forKey: Pref.opacity)
-        panel.alphaValue = CGFloat(v) / 100
+    var opacityLabel: NSTextField?
+
+    /// A menu row with a live slider: drag it and the widget fades immediately.
+    func opacitySliderItem() -> NSMenuItem {
+        let pct = Int((defaults.double(forKey: Pref.opacity) * 100).rounded())
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: 46))
+        let label = NSTextField(labelWithString: "Opacity: \(pct)%")
+        label.font = .menuFont(ofSize: 0)
+        label.frame = NSRect(x: 20, y: 24, width: 200, height: 17)
+        let slider = NSSlider(value: Double(pct), minValue: 20, maxValue: 100,
+                              target: self, action: #selector(opacityChanged(_:)))
+        slider.isContinuous = true
+        slider.controlSize = .small
+        slider.frame = NSRect(x: 20, y: 4, width: 205, height: 18)
+        view.addSubview(label)
+        view.addSubview(slider)
+        opacityLabel = label
+        let item = NSMenuItem()
+        item.view = view
+        return item
+    }
+
+    @objc func opacityChanged(_ sender: NSSlider) {
+        let pct = Int(sender.doubleValue.rounded())
+        defaults.set(Double(pct) / 100, forKey: Pref.opacity)
+        panel.alphaValue = CGFloat(pct) / 100
+        opacityLabel?.stringValue = "Opacity: \(pct)%"
     }
 
     @objc func setRefresh(_ sender: NSMenuItem) {
@@ -653,7 +709,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         panel.alphaValue = 1
         panel.level = .floating
         store.restartTimer()
-        applyPreset(1.0)
+        fitDefaultSize(1.0)
     }
 
     @objc func quit() { NSApp.terminate(nil) }
