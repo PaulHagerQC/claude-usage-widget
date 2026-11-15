@@ -46,5 +46,6 @@ if [[ "${1:-}" == "--zip" ]]; then
   cp -R "$APP" README.md "$STAGE/"
   ditto -c -k --norsrc --noextattr --keepParent "$STAGE" ClaudeUsage.zip
   rm -rf "$(dirname "$STAGE")"
-  echo "Packaged ClaudeUsage.zip"
+  shasum -a 256 ClaudeUsage.zip > ClaudeUsage.zip.sha256
+  echo "Packaged ClaudeUsage.zip (SHA-256: $(cut -d' ' -f1 ClaudeUsage.zip.sha256))"
 fi

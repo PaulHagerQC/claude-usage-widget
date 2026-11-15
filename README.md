@@ -16,6 +16,12 @@ Unofficial community tool — not affiliated with or endorsed by Anthropic.
 ## Install
 
 1. Download `ClaudeUsage.zip` from the [latest release](https://github.com/PaulHagerQC/claude-usage-widget/releases/latest), unzip it and move `ClaudeUsage.app` to `~/Applications` (or `/Applications`).
+
+   Optional — check the download is the published one: download `ClaudeUsage.zip.sha256` from the same release into the same folder and run
+   ```bash
+   cd ~/Downloads && shasum -a 256 -c ClaudeUsage.zip.sha256
+   ```
+   It should print `ClaudeUsage.zip: OK`. (The checksum is also in the release notes.) Prefer not to trust a prebuilt app at all? See [Build from source](#build-from-source).
 2. The app isn't notarized by Apple, so the first time macOS will block it. Either:
    - right-click the app → **Open** → **Open**, or if that doesn't offer Open, go to System Settings → Privacy & Security and click **Open Anyway**; or
    - run once in Terminal:
