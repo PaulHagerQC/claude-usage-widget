@@ -51,7 +51,7 @@ If Claude Code is set up to use AWS Bedrock or an API key instead of a claude.ai
 - **Right-click** (or Ctrl-click) for all options:
   - **Refresh now**
   - **Show bars** — tick which limits to display
-  - **Compact layout** — on by default: one line per bar (hover a bar to see its reset time). Turn off for the larger layout with reset times under each bar
+  - **Compact layout** — on by default: one line per bar with time to reset (e.g. `2h`, `6d`; hover for the exact time). Turn off for the larger layout with reset times under each bar
   - **Opacity** — slider, 20–100 %
   - **Show details** — percentages, reset times, "last updated" line
   - **Refresh every** — 30 s / 1 / 2 / 5 min

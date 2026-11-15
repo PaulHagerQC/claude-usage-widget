@@ -275,6 +275,16 @@ func resetText(_ d: Date?) -> String? {
     return "resets in \(max(m, 1))m"
 }
 
+/// Shortest possible time-to-reset for compact rows: "45m", "2h", "3d".
+func shortResetText(_ d: Date?) -> String? {
+    guard let d = d else { return nil }
+    let s = d.timeIntervalSinceNow
+    if s <= 0 { return "now" }
+    if s < 3600 { return "\(max(1, Int((s / 60).rounded())))m" }
+    if s < 86400 { return "\(Int((s / 3600).rounded()))h" }
+    return "\(Int((s / 86400).rounded()))d"
+}
+
 struct Blur: NSViewRepresentable {
     func makeNSView(context: Context) -> NSVisualEffectView {
         let v = NSVisualEffectView()
@@ -309,9 +319,9 @@ enum Pref {
 /// How the content fits the window. The window is resized freely (like any macOS window);
 /// text grows/shrinks to fit the height, and bars stretch to fill the width.
 enum Layout {
-    static func baseWidth(compact: Bool) -> CGFloat { compact ? 270 : 250 }
+    static func baseWidth(compact: Bool) -> CGFloat { compact ? 300 : 250 }
     /// Narrowest the content may get (at 100 % text size) before text has to shrink.
-    static func minWidth(compact: Bool) -> CGFloat { compact ? 215 : 185 }
+    static func minWidth(compact: Bool) -> CGFloat { compact ? 245 : 185 }
 
     /// Text scale for a window of this size, given the content's height at 100 %.
     static func scale(width: CGFloat, height: CGFloat, natural: CGFloat, compact: Bool) -> CGFloat {
@@ -356,6 +366,12 @@ struct BarRow: View {
                     .frame(width: 118 * scale, alignment: .leading)
                 bar
                 if showPercent { percentText.frame(width: 34 * scale, alignment: .trailing) }
+                if showResets {
+                    Text(shortResetText(bucket.resetsAt) ?? "")
+                        .font(.system(size: 9.5 * scale).monospacedDigit())
+                        .foregroundColor(.secondary)
+                        .frame(width: 24 * scale, alignment: .trailing)
+                }
             }
             .help(resetText(bucket.resetsAt) ?? bucket.detail ?? "")
         } else {
@@ -626,9 +642,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             let it = add(menu, "   " + title, #selector(togglePref(_:)))
             it.representedObject = key
             it.state = defaults.bool(forKey: key) ? .on : .off
-            if key == Pref.showResets && compact {
-                it.title += " (hover in compact)"
-            }
         }
         menu.addItem(.separator())
 
