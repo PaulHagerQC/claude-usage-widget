@@ -7,6 +7,7 @@
 
 import Cocoa
 import SwiftUI
+import Security
 
 // MARK: - Model
 
@@ -17,6 +18,8 @@ struct Bucket: Identifiable {
     let resetsAt: Date?
     var detail: String? = nil   // shown instead of a reset time, e.g. "$217 of $5,000 this month"
 }
+
+struct HTTPStatusError: Error { let code: Int }
 
 struct WidgetError: LocalizedError {
     let message: String
@@ -31,6 +34,7 @@ final class UsageStore: ObservableObject, @unchecked Sendable {
     @Published var lastUpdated: Date?
 
     private var timer: Timer?
+    private var cached: Credentials?   // in memory only; re-read from the keychain when expired/rejected
 
     func start() {
         refresh()
@@ -51,7 +55,9 @@ final class UsageStore: ObservableObject, @unchecked Sendable {
 
     private func load() async {
         do {
-            guard let creds = Self.claudeCodeCredentials() else {
+            if let c = cached, let exp = c.expiresAt, exp < Date() { cached = nil }
+            if cached == nil { cached = Self.claudeCodeCredentials() }
+            guard let creds = cached else {
                 await MainActor.run {
                     self.buckets = []
                     self.source = "none"
@@ -62,7 +68,13 @@ final class UsageStore: ObservableObject, @unchecked Sendable {
             if let exp = creds.expiresAt, exp < Date() {
                 throw WidgetError("Claude login expired. Run `claude` in Terminal for a moment to renew it, then right-click → Refresh now.")
             }
-            let json = try await fetchOAuth(token: creds.token)
+            let json: [String: Any]
+            do {
+                json = try await fetchUsage(token: creds.token)
+            } catch let e as HTTPStatusError where e.code == 401 {
+                cached = nil   // Claude Code may have renewed the login — read it again next time
+                throw WidgetError("Not authorized (401). Run `claude` in Terminal and /login again, then right-click → Refresh now.")
+            }
             let src = "Claude Code login"
             let parsed = Self.parse(json)
             await MainActor.run {
@@ -76,54 +88,78 @@ final class UsageStore: ObservableObject, @unchecked Sendable {
         }
     }
 
-    private func getJSON(_ req: URLRequest) async throws -> Any {
-        let (data, resp) = try await URLSession.shared.data(for: req)
-        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-        guard code == 200 else {
-            if code == 401 || code == 403 {
-                throw WidgetError("Not authorized (\(code)). Run `claude` in Terminal and /login again, then right-click → Refresh now.")
-            }
-            throw WidgetError("HTTP \(code) from \(req.url?.host ?? "server")")
+    // MARK: Network — one fixed HTTPS endpoint, nothing stored, no redirects
+
+    static let usageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
+
+    /// No cookies, no response cache, no credential storage on disk.
+    private static let session: URLSession = {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.httpCookieStorage = nil
+        cfg.urlCache = nil
+        cfg.urlCredentialStorage = nil
+        cfg.httpShouldSetCookies = false
+        cfg.timeoutIntervalForRequest = 20
+        return URLSession(configuration: cfg, delegate: NoRedirects(), delegateQueue: nil)
+    }()
+
+    /// Never follow a redirect: the request carries your token, so it must only ever go to usageURL.
+    private final class NoRedirects: NSObject, URLSessionTaskDelegate {
+        func urlSession(_ session: URLSession, task: URLSessionTask,
+                        willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest,
+                        completionHandler: @escaping (URLRequest?) -> Void) {
+            completionHandler(nil)
         }
-        return try JSONSerialization.jsonObject(with: data)
     }
 
-    // MARK: Claude Code login (OAuth token in the macOS keychain)
+    private func fetchUsage(token: String) async throws -> [String: Any] {
+        var r = URLRequest(url: Self.usageURL)
+        r.httpShouldHandleCookies = false
+        r.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        r.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        r.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+        r.setValue("application/json", forHTTPHeaderField: "Accept")
+        guard r.url?.scheme == "https", r.url?.host == "api.anthropic.com" else {
+            throw WidgetError("Refusing to send the login to \(r.url?.host ?? "?")")
+        }
+        let (data, resp) = try await Self.session.data(for: r)
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        guard code == 200 else {
+            if code == 401 { throw HTTPStatusError(code: code) }
+            if code == 429 { throw WidgetError("Rate limited by the usage server — will retry at the next refresh.") }
+            throw WidgetError("HTTP \(code) from api.anthropic.com")
+        }
+        guard let u = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw WidgetError("Unexpected usage response")
+        }
+        return u
+    }
 
-    static func claudeCodeCredentials() -> (token: String, expiresAt: Date?)? {
-        var raw: Data?
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        p.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        p.standardError = Pipe()
-        if (try? p.run()) != nil {
-            let d = pipe.fileHandleForReading.readDataToEndOfFile()
-            p.waitUntilExit()
-            if p.terminationStatus == 0 { raw = d }
-        }
-        if raw == nil {
-            let f = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/.credentials.json")
-            raw = try? Data(contentsOf: f)
-        }
-        guard let data = raw,
+    // MARK: Claude Code login — read directly from the macOS keychain
+    //
+    // Reads exactly one keychain item ("Claude Code-credentials", which Claude Code creates
+    // when you /login) and keeps only the access token and its expiry. The refresh token and
+    // anything else in that item are ignored, and nothing is written back.
+
+    struct Credentials { let token: String; let expiresAt: Date? }
+
+    static func claudeCodeCredentials() -> Credentials? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "Claude Code-credentials",
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecReturnData as String: true,
+        ]
+        var out: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess,
+              let data = out as? Data,
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let oauth = obj["claudeAiOauth"] as? [String: Any],
               let tok = oauth["accessToken"] as? String else { return nil }
         var exp: Date?
         if let ms = (oauth["expiresAt"] as? NSNumber)?.doubleValue { exp = Date(timeIntervalSince1970: ms / 1000) }
-        return (tok, exp)
-    }
-
-    private func fetchOAuth(token: String) async throws -> [String: Any] {
-        var r = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!)
-        r.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        r.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
-        r.setValue("application/json", forHTTPHeaderField: "Accept")
-        r.timeoutInterval = 20
-        guard let u = try await getJSON(r) as? [String: Any] else { throw WidgetError("Unexpected usage response") }
-        return u
+        return Credentials(token: tok, expiresAt: exp)
     }
 
     // MARK: Parsing

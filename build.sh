@@ -35,7 +35,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-codesign --force --sign - "$APP" >/dev/null 2>&1 || true
+# Ad-hoc sign with the App Sandbox (network client only) and the hardened runtime.
+codesign --force --sign - --options runtime --entitlements ClaudeUsage.entitlements "$APP"
 echo "Built $APP — start it with: open $APP"
 
 # bash build.sh --zip  → also makes ClaudeUsage.zip to send to teammates

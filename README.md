@@ -38,7 +38,7 @@ The widget reads your usage through the **Claude Code** login in your keychain. 
 
 1. In Terminal run `claude`, type `/login`, pick your **Claude account** and finish in the browser.
    (No Claude Code yet? Install it from https://claude.com/claude-code.)
-2. Right-click the widget → **Refresh now**. When macOS asks whether ClaudeUsage may use the "Claude Code-credentials" keychain item, choose **Always Allow**.
+2. Right-click the widget → **Refresh now**. When macOS asks whether ClaudeUsage may use the "Claude Code-credentials" keychain item, choose **Always Allow** (or **Allow** to be asked again each time the app starts). After installing a new version macOS asks once more.
 
 The login lasts about 8 hours and is renewed whenever `claude` runs. If the widget says the login expired, run `claude` in Terminal for a moment, then **Refresh now**.
 
@@ -59,6 +59,19 @@ If Claude Code is set up to use AWS Bedrock or an API key instead of a claude.ai
 
 Settings are saved and kept across restarts.
 
+## Security & permissions
+
+The app asks for as little as possible:
+
+| What | Access |
+|---|---|
+| **Keychain** | Reads one item, `Claude Code-credentials`, via the system keychain API — macOS asks you first, naming ClaudeUsage. Keeps only the access token and its expiry, in memory; ignores the refresh token; never writes to the keychain. |
+| **Network** | Sends that token to exactly one address, `https://api.anthropic.com/api/oauth/usage`. Redirects are refused, nothing is cached, no cookies, no analytics. |
+| **Files** | None. The app runs in the macOS **App Sandbox** with only the "outgoing network connections" permission, so it can't read your files, even if it wanted to. Its settings live in `~/Library/Containers/local.claude-usage-widget`. |
+| **Other programs** | None — it doesn't run any. |
+
+What it *can't* restrict: the token itself. It's Claude Code's login token, which can do anything Claude Code can do with your account, not just read usage. Anthropic doesn't offer a read-only "usage" token, so the app protects it by the rules above instead. The code is one file — [ClaudeUsage.swift](ClaudeUsage.swift) — so you can check all of this yourself.
+
 ## Build from source
 
 ```bash
@@ -66,11 +79,11 @@ bash build.sh          # builds ClaudeUsage.app
 bash build.sh --zip    # also makes ClaudeUsage.zip to share
 ```
 
-Needs the Xcode Command Line Tools (`xcode-select --install`).
+Needs the Xcode Command Line Tools (`xcode-select --install`). The app is signed ad hoc with the sandbox entitlements in [ClaudeUsage.entitlements](ClaudeUsage.entitlements).
 
 ## Notes
 
-It calls the same internal endpoint Claude Code uses for `/usage` (`api.anthropic.com/api/oauth/usage`), not a public API, so it could change. Every limit the endpoint reports becomes a bar, so new limits show up automatically. If something breaks, the error appears in the panel. Your token never leaves your Mac except to that endpoint.
+It calls the same internal endpoint Claude Code uses for `/usage` (`api.anthropic.com/api/oauth/usage`), not a public API, so it could change. Every limit the endpoint reports becomes a bar, so new limits show up automatically. If something breaks, the error appears in the panel.
 
 ## License
 
