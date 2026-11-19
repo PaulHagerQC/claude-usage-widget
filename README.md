@@ -40,7 +40,7 @@ The widget reads your usage through the **Claude Code** login in your keychain. 
    (No Claude Code yet? Install it from https://claude.com/claude-code.)
 2. Right-click the widget → **Refresh now**. There is no keychain prompt: the widget reads the login the same way Claude Code does.
 
-The login lasts about 8 hours and is renewed whenever `claude` runs. If the widget says the login expired, run `claude` in Terminal for a moment, then **Refresh now**.
+After that the widget keeps itself signed in: when the login is about to expire (every ~8 hours) it renews it, the same way Claude Code does. You only need `/login` again if you log out of Claude Code or the renewal stops working.
 
 If Claude Code is set up to use AWS Bedrock or an API key instead of a claude.ai login, there are no claude.ai limits to show, so the widget can't work for that setup.
 
@@ -65,10 +65,14 @@ The app asks for as little as possible:
 
 | What | Access |
 |---|---|
-| **Keychain** | Reads one item, `Claude Code-credentials`, through Apple's `/usr/bin/security` tool — the same way Claude Code reads it. (Claude Code's item only trusts Apple's tools, so reading it directly would make macOS ask for your password on every refresh.) Keeps only the access token and its expiry, in memory; ignores the refresh token; never writes to the keychain. |
-| **Network** | Sends that token to exactly one address, `https://api.anthropic.com/api/oauth/usage`. Redirects are refused, nothing is cached, no cookies, no analytics. |
+| **Keychain** | Uses one item, `Claude Code-credentials`, through Apple's `/usr/bin/security` tool — the same way Claude Code does. (Claude Code's item only trusts Apple's tools, so going through the keychain API would make macOS ask for your password on every refresh.) Keeps only the access token and its expiry in memory. When the login is about to expire it renews it and saves the new tokens back into the same item, changing only the token fields. |
+| **Network** | Talks to exactly two Anthropic addresses: `https://api.anthropic.com/api/oauth/usage` (reads your usage) and `https://platform.claude.com/v1/oauth/token` (renews the login, about every 8 hours). Redirects are refused, nothing is cached, no cookies, no analytics. |
 | **Files** | None. The app runs in the macOS **App Sandbox** with only the "outgoing network connections" permission, so it can't read your files, even if it wanted to. Its settings live in `~/Library/Containers/local.claude-usage-widget`. |
-| **Other programs** | Only `/usr/bin/security find-generic-password -s "Claude Code-credentials" -w`, when the token is missing or expired. It runs inside the same sandbox. |
+| **Other programs** | Only Apple's `/usr/bin/security`, to read that item when the token is missing or expired and to save a renewed login. It runs inside the same sandbox. The new tokens are passed to it through a pipe, never on the command line. |
+
+Renewal tokens can only be used once. The widget re-reads the item right before renewing (Claude Code may just have done it) and only saves if nothing changed in between. If both still renew at the same instant, one of them can end up logged out — run `/login` again.
+
+Note that the sandbox doesn't stop the widget from reading or changing that item: Claude Code's item lets Apple's `security` tool read it and any app change it. The limits above are kept by the code, which you can read.
 
 What it *can't* restrict: the token itself. It's Claude Code's login token, which can do anything Claude Code can do with your account, not just read usage. Anthropic doesn't offer a read-only "usage" token, so the app protects it by the rules above instead. The code is one file — [ClaudeUsage.swift](ClaudeUsage.swift) — so you can check all of this yourself.
 

@@ -54,8 +54,9 @@ final class UsageStore: ObservableObject, @unchecked Sendable {
 
     private func load() async {
         do {
-            if let c = cached, let exp = c.expiresAt, exp < Date() { cached = nil }
+            if let c = cached, c.expiresSoon { cached = nil }
             if cached == nil { cached = Self.claudeCodeCredentials() }
+            if let c = cached, c.expiresSoon { cached = await renew(c) }
             guard let creds = cached else {
                 await MainActor.run {
                     self.buckets = []
@@ -64,8 +65,9 @@ final class UsageStore: ObservableObject, @unchecked Sendable {
                 }
                 return
             }
-            if let exp = creds.expiresAt, exp < Date() {
-                throw WidgetError("Claude login expired. Run `claude` in Terminal for a moment to renew it, then right-click → Refresh now.")
+            if creds.expiresSoon && creds.expiresAt! < Date() {
+                cached = nil
+                throw WidgetError("Claude login expired and couldn't be renewed. In Terminal run `claude` and /login, then right-click → Refresh now.")
             }
             let json: [String: Any]
             do {
@@ -135,39 +137,137 @@ final class UsageStore: ObservableObject, @unchecked Sendable {
         return u
     }
 
-    // MARK: Claude Code login — read from the macOS keychain
+    // MARK: Claude Code login — read from (and renewed in) the macOS keychain
     //
-    // Reads exactly one keychain item ("Claude Code-credentials", which Claude Code creates
-    // when you /login) and keeps only the access token and its expiry. The refresh token and
-    // anything else in that item are ignored, and nothing is written back.
+    // Uses exactly one keychain item: "Claude Code-credentials", which Claude Code creates when
+    // you /login. The item is accessed through Apple's /usr/bin/security tool, the same way Claude
+    // Code does: the item only trusts Apple's command-line tools, so going through the keychain
+    // API would make macOS ask for your password on every read, even after Always Allow.
     //
-    // The item is read through Apple's /usr/bin/security tool (the same way Claude Code reads it)
-    // rather than the keychain API: Claude Code's item only trusts Apple's command-line tools, so
-    // macOS would otherwise ask for the keychain password on every read, even after Always Allow.
+    // When the login is about to expire, the widget renews it the way Claude Code does (one
+    // request to Anthropic's sign-in server) and saves the result back into the same item, changing
+    // only the token fields and keeping everything else in it. Renewal tokens work only once, so
+    // the item is re-read right before renewing (Claude Code may have just done it) and the result
+    // is only saved if nobody renewed in the meantime.
 
-    struct Credentials { let token: String; let expiresAt: Date? }
+    struct Credentials {
+        let token: String
+        let expiresAt: Date?
+        var expiresSoon: Bool { expiresAt.map { $0.timeIntervalSinceNow < 300 } ?? false }
+    }
+
+    static let service = "Claude Code-credentials"
+    static let tokenURL = URL(string: "https://platform.claude.com/v1/oauth/token")!
+    static let clientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"   // Claude Code's public OAuth client
+    private let renewLock = NSLock()
+    private var renewing = false
+    private func setRenewing(_ on: Bool) -> Bool {   // returns false if a renewal is already running
+        renewLock.lock(); defer { renewLock.unlock() }
+        if on && renewing { return false }
+        renewing = on
+        return true
+    }
 
     static func claudeCodeCredentials() -> Credentials? {
+        guard let obj = readItem(), let oauth = obj["claudeAiOauth"] as? [String: Any] else { return nil }
+        return credentials(from: oauth)
+    }
+
+    private static func credentials(from oauth: [String: Any]) -> Credentials? {
+        guard let tok = oauth["accessToken"] as? String else { return nil }
+        var exp: Date?
+        if let ms = (oauth["expiresAt"] as? NSNumber)?.doubleValue { exp = Date(timeIntervalSince1970: ms / 1000) }
+        return Credentials(token: tok, expiresAt: exp)
+    }
+
+    /// Renews an expiring login. Returns the new credentials, or the old ones if renewal isn't possible.
+    func renew(_ old: Credentials, force: Bool = false) async -> Credentials? {
+        guard setRenewing(true) else { return old }
+        defer { _ = setRenewing(false) }
+        // Re-read right before renewing: Claude Code may have renewed already.
+        guard let item = Self.readItem(), let oauth = item["claudeAiOauth"] as? [String: Any],
+              let current = Self.credentials(from: oauth) else { return old }
+        if !current.expiresSoon && !force { return current }
+        guard let refresh = oauth["refreshToken"] as? String else { return current }
+        let scopes = (oauth["scopes"] as? [String]) ?? ["user:profile", "user:inference"]
+
+        var r = URLRequest(url: Self.tokenURL)
+        r.httpMethod = "POST"
+        r.httpShouldHandleCookies = false
+        r.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        r.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "grant_type": "refresh_token", "refresh_token": refresh,
+            "client_id": Self.clientID, "scope": scopes.joined(separator: " "),
+        ])
+        guard r.url?.scheme == "https", r.url?.host == "platform.claude.com",
+              let (data, resp) = try? await Self.session.data(for: r),
+              (resp as? HTTPURLResponse)?.statusCode == 200,
+              let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let access = body["access_token"] as? String,
+              let expiresIn = (body["expires_in"] as? NSNumber)?.doubleValue else { return current }
+        let expiresAt = Date().addingTimeInterval(expiresIn)
+
+        // Save back only if nobody else renewed while we were waiting; keep every other field.
+        if var latest = Self.readItem(), var o = latest["claudeAiOauth"] as? [String: Any],
+           o["refreshToken"] as? String == refresh {
+            o["accessToken"] = access
+            o["refreshToken"] = (body["refresh_token"] as? String) ?? refresh
+            o["expiresAt"] = NSNumber(value: Int64(expiresAt.timeIntervalSince1970 * 1000))
+            if let rexp = (body["refresh_token_expires_in"] as? NSNumber)?.doubleValue {
+                o["refreshTokenExpiresAt"] = NSNumber(value: Int64((Date().timeIntervalSince1970 + rexp) * 1000))
+            }
+            if let sc = body["scope"] as? String { o["scopes"] = sc.split(separator: " ").map(String.init) }
+            latest["claudeAiOauth"] = o
+            Self.writeItem(latest)
+        }
+        return Credentials(token: access, expiresAt: expiresAt)
+    }
+
+    // MARK: /usr/bin/security
+
+    private static func runSecurity(_ args: [String], stdin: Data? = nil) -> (status: Int32, out: Data) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        p.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
-        let out = Pipe()
+        p.arguments = args
+        let out = Pipe(), inp = Pipe()
         p.standardOutput = out
         p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { return nil }
-        var data = out.fileHandleForReading.readDataToEndOfFile()
+        if stdin != nil { p.standardInput = inp }
+        do { try p.run() } catch { return (-1, Data()) }
+        if let stdin { inp.fileHandleForWriting.write(stdin); try? inp.fileHandleForWriting.close() }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
-        guard p.terminationStatus == 0 else { return nil }
+        return (p.terminationStatus, data)
+    }
+
+    static func readItem() -> [String: Any]? {
+        var (st, data) = runSecurity(["find-generic-password", "-s", service, "-w"])
+        guard st == 0 else { return nil }
         while let last = data.last, last == 0x0A || last == 0x0D { data.removeLast() }
         // `security -w` prints the value as hex if it isn't plain text.
         if data.first != UInt8(ascii: "{"), let hex = String(data: data, encoding: .ascii),
            let decoded = Data(hexString: hex) { data = decoded }
-        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let oauth = obj["claudeAiOauth"] as? [String: Any],
-              let tok = oauth["accessToken"] as? String else { return nil }
-        var exp: Date?
-        if let ms = (oauth["expiresAt"] as? NSNumber)?.doubleValue { exp = Date(timeIntervalSince1970: ms / 1000) }
-        return Credentials(token: tok, expiresAt: exp)
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
+
+    /// The account name of the existing item, so the update replaces it instead of adding a second one.
+    private static func itemAccount() -> String? {
+        let (st, data) = runSecurity(["find-generic-password", "-s", service])
+        guard st == 0, let text = String(data: data, encoding: .utf8),
+              let line = text.split(separator: "\n").first(where: { $0.contains("\"acct\"<blob>=\"") }),
+              let start = line.range(of: "=\""), line.hasSuffix("\"") else { return nil }
+        return String(line[start.upperBound..<line.index(before: line.endIndex)])
+    }
+
+    /// Updates the item in place. The value goes through stdin (as hex), never the command line,
+    /// so it can't be seen in the process list.
+    private static func writeItem(_ obj: [String: Any]) {
+        guard let acct = itemAccount(), !acct.contains("\""),
+              let json = try? JSONSerialization.data(withJSONObject: obj) else { return }
+        let hex = json.map { String(format: "%02x", $0) }.joined()
+        let cmd = "add-generic-password -U -a \"\(acct)\" -s \"\(service)\" -X \(hex)\n"
+        _ = runSecurity(["-i"], stdin: Data(cmd.utf8))
     }
 
     // MARK: Parsing
