@@ -38,7 +38,7 @@ The widget reads your usage through the **Claude Code** login in your keychain. 
 
 1. In Terminal run `claude`, type `/login`, pick your **Claude account** and finish in the browser.
    (No Claude Code yet? Install it from https://claude.com/claude-code.)
-2. Right-click the widget → **Refresh now**. When macOS asks whether ClaudeUsage may use the "Claude Code-credentials" keychain item, choose **Always Allow** (or **Allow** to be asked again each time the app starts). After installing a new version macOS asks once more.
+2. Right-click the widget → **Refresh now**. There is no keychain prompt: the widget reads the login the same way Claude Code does.
 
 The login lasts about 8 hours and is renewed whenever `claude` runs. If the widget says the login expired, run `claude` in Terminal for a moment, then **Refresh now**.
 
@@ -65,10 +65,10 @@ The app asks for as little as possible:
 
 | What | Access |
 |---|---|
-| **Keychain** | Reads one item, `Claude Code-credentials`, via the system keychain API — macOS asks you first, naming ClaudeUsage. Keeps only the access token and its expiry, in memory; ignores the refresh token; never writes to the keychain. |
+| **Keychain** | Reads one item, `Claude Code-credentials`, through Apple's `/usr/bin/security` tool — the same way Claude Code reads it. (Claude Code's item only trusts Apple's tools, so reading it directly would make macOS ask for your password on every refresh.) Keeps only the access token and its expiry, in memory; ignores the refresh token; never writes to the keychain. |
 | **Network** | Sends that token to exactly one address, `https://api.anthropic.com/api/oauth/usage`. Redirects are refused, nothing is cached, no cookies, no analytics. |
 | **Files** | None. The app runs in the macOS **App Sandbox** with only the "outgoing network connections" permission, so it can't read your files, even if it wanted to. Its settings live in `~/Library/Containers/local.claude-usage-widget`. |
-| **Other programs** | None — it doesn't run any. |
+| **Other programs** | Only `/usr/bin/security find-generic-password -s "Claude Code-credentials" -w`, when the token is missing or expired. It runs inside the same sandbox. |
 
 What it *can't* restrict: the token itself. It's Claude Code's login token, which can do anything Claude Code can do with your account, not just read usage. Anthropic doesn't offer a read-only "usage" token, so the app protects it by the rules above instead. The code is one file — [ClaudeUsage.swift](ClaudeUsage.swift) — so you can check all of this yourself.
 

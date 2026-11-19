@@ -7,7 +7,6 @@
 
 import Cocoa
 import SwiftUI
-import Security
 
 // MARK: - Model
 
@@ -136,25 +135,34 @@ final class UsageStore: ObservableObject, @unchecked Sendable {
         return u
     }
 
-    // MARK: Claude Code login — read directly from the macOS keychain
+    // MARK: Claude Code login — read from the macOS keychain
     //
     // Reads exactly one keychain item ("Claude Code-credentials", which Claude Code creates
     // when you /login) and keeps only the access token and its expiry. The refresh token and
     // anything else in that item are ignored, and nothing is written back.
+    //
+    // The item is read through Apple's /usr/bin/security tool (the same way Claude Code reads it)
+    // rather than the keychain API: Claude Code's item only trusts Apple's command-line tools, so
+    // macOS would otherwise ask for the keychain password on every read, even after Always Allow.
 
     struct Credentials { let token: String; let expiresAt: Date? }
 
     static func claudeCodeCredentials() -> Credentials? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "Claude Code-credentials",
-            kSecMatchLimit as String: kSecMatchLimitOne,
-            kSecReturnData as String: true,
-        ]
-        var out: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess,
-              let data = out as? Data,
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        p.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        do { try p.run() } catch { return nil }
+        var data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        guard p.terminationStatus == 0 else { return nil }
+        while let last = data.last, last == 0x0A || last == 0x0D { data.removeLast() }
+        // `security -w` prints the value as hex if it isn't plain text.
+        if data.first != UInt8(ascii: "{"), let hex = String(data: data, encoding: .ascii),
+           let decoded = Data(hexString: hex) { data = decoded }
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let oauth = obj["claudeAiOauth"] as? [String: Any],
               let tok = oauth["accessToken"] as? String else { return nil }
         var exp: Date?
@@ -776,3 +784,17 @@ enum ClaudeUsageMain {
     }
 }
 #endif
+
+extension Data {
+    init?(hexString: String) {
+        let chars = Array(hexString.utf8)
+        guard chars.count % 2 == 0 else { return nil }
+        var bytes = [UInt8](); bytes.reserveCapacity(chars.count / 2)
+        var i = 0
+        while i < chars.count {
+            guard let b = UInt8(String(decoding: chars[i..<i+2], as: UTF8.self), radix: 16) else { return nil }
+            bytes.append(b); i += 2
+        }
+        self.init(bytes)
+    }
+}
